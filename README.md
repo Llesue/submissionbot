@@ -1,5 +1,4 @@
-# submissionbot
-Telegram 投稿机器人
+# submissionbot Telegram 投稿机器人
 ## 有啥功能
 - 投稿，期间可以修改标题
 - 审稿，可以直接接受也可以修改标题，标题修改会同步到投稿者
@@ -10,7 +9,7 @@ Telegram 投稿机器人
 - 视频下载到本地
 ## 怎么用
 - 安装 ffmpeg `apt install ffmpeg`
-- 安装 python3
+- 安装 python3 python.org
 - 安装源代码上面部分的那几个依赖库
 - 源码头部输入你自己的 chat_id，频道 chat_id 和机器人的工作目录
 - 然后直接 `python3 submissionbot.py` 就可以了，想后台运行可以使用 screen 或者 tmux，或者直接用 systemctl 搞
