@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import time
+import cv2
 
 dir = "/path/to/directory/submissionbot"
 bot_token = ""
@@ -10,6 +11,8 @@ admin_id = ""
 channel_id = ""
 
 bot = telebot.TeleBot(bot_token, parse_mode=None, num_threads=10)
+linked_chat_id = bot.get_chat(channel_id).linked_chat_id or None
+
 os.makedirs(dir, exist_ok=True)
 
 db_path = f"{dir}/submission.db"
@@ -40,7 +43,7 @@ if not os.path.exists(db_path):
             timestamp INTEGER \
         )')
         conn.commit()
-
+        
 def adduser(message):
     first_name = message.from_user.first_name
     last_name = message.from_user.last_name
@@ -146,10 +149,9 @@ def handleStart(message):
         text = f"*投稿排行 Top 10 Submissioners*\n\n{list}"
         bot.send_message(send_user_id,text,parse_mode="MARKDOWN",disable_web_page_preview=True)
 
-# receive contents
-@bot.message_handler(content_types=["video", "text"])
+# receive contents from private message
+@bot.message_handler(content_types=["text","video","photo","document"],func=lambda message:message.chat.type in ["private"])
 def handle_video(message):
-    is_private = True if not message.chat.title else False
     msg_id = message.message_id
     timestamp = message.date
     
@@ -162,96 +164,95 @@ def handle_video(message):
     full_name = f"{first_name} {last_name}" if last_name else f"{first_name}"
     linked_name = f"[{full_name}](https://t.me/{username})" if username else f"[{full_name}](tg://user?id={user_id})"
 
-    if is_private:
-        adduser(message)
-        is_banned, _ = dbGet(f"SELECT is_banned, timestamp FROM users WHERE user_id={user_id}")
-        banned_user = True if is_banned else False
-        if not banned_user:
-            if message.content_type == "video":
-                video_fid = message.video.file_id
-                caption = message.caption
-                filesize = int(message.video.file_size)
-                filename = message.video.file_name or f"{message.video.file_unique_id}.mp4"
-                thumbnail_fid = message.video.thumbnail.file_id
+    adduser(message)
+    is_banned, _ = dbGet(f"SELECT is_banned, timestamp FROM users WHERE user_id={user_id}")
+    banned_user = True if is_banned else False
+    if not banned_user:
+        if message.content_type == "video":
+            video_fid = message.video.file_id
+            caption = message.caption
+            filesize = int(message.video.file_size)
+            filename = message.video.file_name or f"{message.video.file_unique_id}.mp4"
+            thumbnail_fid = message.video.thumbnail.file_id
 
-                bot.delete_message(user_id, msg_id)
-                sendvideo_id = bot.send_video(user_id,video_fid,caption=caption).message_id
+            bot.delete_message(user_id, msg_id)
+            sendvideo_id = bot.send_video(user_id,video_fid,caption=caption).message_id
 
-                markup = telebot.types.InlineKeyboardMarkup()
-                btn_submit = telebot.types.InlineKeyboardButton("提交 Submit", callback_data=f"submit_ok_{sendvideo_id}")
-                btn_cancel = telebot.types.InlineKeyboardButton("取消 Cancel", callback_data=f"submit_cancel_{sendvideo_id}")
-                markup.add(btn_submit, btn_cancel)
+            markup = telebot.types.InlineKeyboardMarkup()
+            btn_submit = telebot.types.InlineKeyboardButton("提交 Submit", callback_data=f"submit_ok_{sendvideo_id}")
+            btn_cancel = telebot.types.InlineKeyboardButton("取消 Cancel", callback_data=f"submit_cancel_{sendvideo_id}")
+            markup.add(btn_submit, btn_cancel)
 
-                # deal video
-                query = "INSERT INTO files (user_id, file_id, thumbnail_fid, caption, filesize, file_name, msg_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                params = (user_id, video_fid, thumbnail_fid, caption, filesize, filename, sendvideo_id, timestamp)
+            # deal video
+            query = "INSERT INTO files (user_id, file_id, thumbnail_fid, caption, filesize, file_name, msg_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            params = (user_id, video_fid, thumbnail_fid, caption, filesize, filename, sendvideo_id, timestamp)
+            dbUpdate(query,params)
+
+            text = "✏️ 请输入视频内容描述后点击提交。\n✏️ Write down the description of the video and Submit."
+            bot.send_message(user_id,text,reply_to_message_id=sendvideo_id,reply_markup=markup)
+        elif message.content_type == "text":
+            caption = message.text
+            db_capture = dbGet(f"SELECT convert_fid FROM files WHERE user_id={user_id} ORDER BY timestamp DESC LIMIT 1")
+            cap_locked = db_capture[0] if db_capture else True
+            # print(cap_locked)
+            if not cap_locked:
+                pid, vidmsg_id = dbGet(f"SELECT id, msg_id FROM files WHERE user_id={user_id} ORDER BY timestamp DESC LIMIT 1")
+                query = "UPDATE files SET caption=?, timestamp=? WHERE id=?"
+                params = (caption, timestamp, pid)
                 dbUpdate(query,params)
 
-                text = "✏️ 请输入视频内容描述后点击提交。\n✏️ Write down the description of the video and Submit."
-                bot.send_message(user_id,text,reply_to_message_id=sendvideo_id,reply_markup=markup)
-            elif message.content_type == "text":
-                caption = message.text
-                db_capture = dbGet(f"SELECT convert_fid FROM files WHERE user_id={user_id} ORDER BY timestamp DESC LIMIT 1")
-                cap_locked = db_capture[0] if db_capture else True
-                # print(cap_locked)
-                if not cap_locked:
-                    pid, vidmsg_id = dbGet(f"SELECT id, msg_id FROM files WHERE user_id={user_id} ORDER BY timestamp DESC LIMIT 1")
+                try:
+                    bot.edit_message_caption(caption, user_id, vidmsg_id)
+                    bot.delete_message(user_id, msg_id)
+                except:
+                    pass
+            else:
+                text = f"{linked_name}: {caption}"
+                bot.send_message(admin_id,text,parse_mode="MARKDOWN",disable_web_page_preview=True) if not int(user_id) == int(admin_id) else None
+                
+            # 管理员编辑视频标题流程
+            if int(user_id) == int(admin_id):
+                try:
+                    id, vidmsg_id, ovidmsg_id, sender_id = dbGet(f"SELECT id, amsg_id, msg_id, user_id FROM files WHERE convert_fid='789' ORDER BY timestamp DESC LIMIT 1") 
+                except:
+                    vidmsg_id = None
+
+                if vidmsg_id:
                     query = "UPDATE files SET caption=?, timestamp=? WHERE id=?"
-                    params = (caption, timestamp, pid)
+                    params = (caption, timestamp, id)
                     dbUpdate(query,params)
 
                     try:
                         bot.edit_message_caption(caption, user_id, vidmsg_id)
                         bot.delete_message(user_id, msg_id)
+                        bot.edit_message_caption(caption, sender_id, ovidmsg_id)
                     except:
                         pass
-                else:
-                    text = f"{linked_name}: {caption}"
-                    bot.send_message(admin_id,text,parse_mode="MARKDOWN",disable_web_page_preview=True)
-                    
-                # 管理员编辑视频标题流程
-                if int(user_id) == int(admin_id):
-                    try:
-                        id, vidmsg_id, ovidmsg_id, sender_id = dbGet(f"SELECT id, amsg_id, msg_id, user_id FROM files WHERE convert_fid='789' ORDER BY timestamp DESC LIMIT 1") 
-                    except:
-                        vidmsg_id = None
-
-                    if vidmsg_id:
-                        query = "UPDATE files SET caption=?, timestamp=? WHERE id=?"
-                        params = (caption, timestamp, id)
-                        dbUpdate(query,params)
-
+                # 管理员回复视频流程
+                is_reply = True if message.reply_to_message else False
+                if is_reply:
+                    is_video = True if message.reply_to_message else False
+                    if is_video:
+                        text = message.text
+                        reply_caption = message.reply_to_message.caption
                         try:
-                            bot.edit_message_caption(caption, user_id, vidmsg_id)
-                            bot.delete_message(user_id, msg_id)
-                            bot.edit_message_caption(caption, sender_id, ovidmsg_id)
+                            target_uid,msg_id = dbGet(f"SELECT user_id, msg_id FROM files WHERE caption='{reply_caption}'")
                         except:
-                            pass
-                    # 管理员回复视频流程
-                    is_reply = True if message.reply_to_message else False
-                    if is_reply:
-                        is_video = True if message.reply_to_message else False
-                        if is_video:
-                            text = message.text
-                            reply_caption = message.reply_to_message.caption
-                            try:
-                                target_uid,msg_id = dbGet(f"SELECT user_id, msg_id FROM files WHERE caption='{reply_caption}'")
-                            except:
-                                target_uid = None
-                            try:
-                                bot.send_message(target_uid,text,reply_to_message_id=msg_id) if target_uid else None
-                                text = "消息发送成功" if target_uid else "消息发送失败"
-                                del_later = bot.send_message(admin_id,text).message_id
-                                time.sleep(3)
-                                bot.delete_message(admin_id,del_later)
-                            except:
-                                del_later = bot.send_message(admin_id,"消息发送失败").message_id
-                                time.sleep(3)
-                                bot.delete_message(admin_id,del_later)
-            else:
-                bot.send_message(user_id,"我们频道仅接受视频投稿哦")
+                            target_uid = None
+                        try:
+                            bot.send_message(target_uid,text,reply_to_message_id=msg_id) if target_uid else None
+                            text = "消息发送成功" if target_uid else "消息发送失败"
+                            del_later = bot.send_message(admin_id,text).message_id
+                            time.sleep(3)
+                            bot.delete_message(admin_id,del_later)
+                        except:
+                            del_later = bot.send_message(admin_id,"消息发送失败").message_id
+                            time.sleep(3)
+                            bot.delete_message(admin_id,del_later)
         else:
-            bot.send_message(user_id, "💩 您已被禁止投稿。\n💩 You're been banned.")
+            bot.send_message(user_id,"我们频道仅接受视频投稿哦")
+    else:
+        bot.send_message(user_id, "💩 您已被禁止投稿。\n💩 You're been banned.")
 
 # 视频压缩并发送流程
 def compress_and_send(id):
@@ -270,25 +271,43 @@ def compress_and_send(id):
         os.rename(path, new_path)
         
         output_dir = f"{dir}/download/converted"
+        thumb_dir = f"{dir}/download/thumbnails"
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(thumb_dir, exist_ok=True)
         output_file = f"{output_dir}/submission_{id}_{file_name}"
-        print(path)
-        print(new_path)
+        thumbnail = f"{thumb_dir}/submission_{id}_{file_name}.jpeg"
+
+        # get video dimentions
+        cap = cv2.VideoCapture(new_path)
+        # width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        # height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+        # get video duration
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        video_len = frame_count / fps
+        wmdismiss = video_len - 5
         
         ffmpeg_cmd = [
             "ffmpeg",
             "-i", new_path,
             "-i", f"{dir}/watermark.png",
             "-filter_complex",
-                "[0]scale=w='if(lt(iw,ih),480,-2):h=if(gte(iw,ih),480,-2)'[vid];"
+                f"[0]scale=w='if(lt(iw,ih),max(iw,480),-2):h=if(gte(iw,ih),max(ih,480),-2)'[vid];"
                 "[1]scale=w='if(gt(iw,ih),iw*35/100,iw*40/100)':h=-1[wm];"
-                "[vid][wm]overlay=x=w/4:y=w/4:enable='between(t,5,10)+between(t,25,60)+between(t,90,600)':format=auto,format=yuv420p",
+                f"[vid][wm]overlay=x=w/4:y=w/4:enable='between(t,5,10)+between(t,25,60)+between(t,90,{wmdismiss})':format=auto,format=yuv420p",
             "-c:a", "aac",
             "-c:v", "libx264",
             "-strict", "-2",
             "-crf", "26",
-            "-y", output_file
+            "-ss", "00:00:03",
+            "-y", output_file,
+            "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+            "-vframes", "1",
+            "-update", "1",
+            thumbnail
         ]
+
         try:
             subprocess.run(ffmpeg_cmd)
         except:
@@ -296,13 +315,13 @@ def compress_and_send(id):
 
         # 查看文件是否超过50MB
         converted_size = round(os.path.getsize(output_file) / 1024 / 1024, 2)
-        sendto_id = channel_id if converted_size < 10 else admin_id
+        sendto_id = channel_id if converted_size < 50 else admin_id
 
         if converted_size < 50:
-            with open(output_file, "rb") as v:
-                new_fid = bot.send_video(sendto_id, v, caption=caption, thumb=thumb_fid, thumbnail=thumb_fid).video.file_id
+            with open(output_file,"rb") as v,open(thumbnail,"rb") as th:
+                new_fid = bot.send_video(sendto_id,v,caption=caption,thumbnail=th).video.file_id
         else:
-            new_fid = bot.send_video(sendto_id, file_id, caption=caption).video.file_id
+            new_fid = bot.send_video(sendto_id,file_id,caption=caption).video.file_id
 
         query = "UPDATE files SET convert_fid=? WHERE id=?"
         params = (new_fid,id)
@@ -392,6 +411,9 @@ def callData(call):
             btn_dealcancel = telebot.types.InlineKeyboardButton("取消",callback_data=f"deal_cancel_{id}")
             markup.add(btn_dealok,btn_dealcancel)
             bot.edit_message_text("请输入新描述后确定：", call.message.chat.id, call.message.message_id,reply_markup=markup)
+            # 重置所有 789 的字段为 111，以应对数据库串行
+            query = "UPDATE files SET convert_fid=111 WHERE convert_fid=789"
+            dbUpdate(query)
             # 用数据库做标记，以便接收新描述
             query = "UPDATE files SET convert_fid=? WHERE id=?"
             params = ("789",id)
