@@ -5,7 +5,7 @@ import subprocess
 import time
 import cv2
 
-dir = "/path/to/directory/submissionbot"
+dir = "/path/to/dir/submissionbot"
 bot_token = ""
 admin_id = ""
 channel_id = ""
